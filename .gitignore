@@ -1,0 +1,53 @@
+# Data and artifacts
+*.csv
+*.jsonl
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.zip
+*.tar
+*.tar.gz
+
+# Run outputs
+outputs/
+runs/
+logs/
+work/
+verdict.txt
+score.json
+output_actions.csv
+input_states.jsonl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+__MACOSX/
+
+# Local config
+.env
+.env.local
