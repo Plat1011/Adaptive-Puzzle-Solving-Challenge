@@ -48,6 +48,8 @@ def build_compact_table(
     deadline: float,
     max_states: int = 5_000_000,
     max_rss_mb: float = 8192.0,
+    checkpoint_workdir: Optional[str] = None,
+    checkpoint_every_sec: float = 300.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], int]:
     env.reset()
     goal_state = to_jsonable(env.get_state())
@@ -58,6 +60,7 @@ def build_compact_table(
     depth = 0
     rss_check_every = 50_000
     last_rss_check = 0
+    last_checkpoint = time.time()
     while cur_payload and time.time() < deadline and len(table) < max_states:
         next_payload: Dict[int, Any] = {}
         for h, state in cur_payload.items():
@@ -66,8 +69,10 @@ def build_compact_table(
             if max_rss_mb and len(table) - last_rss_check >= rss_check_every:
                 last_rss_check = len(table)
                 if _rss_mb() > max_rss_mb:
-                    cur_payload = next_payload
                     return _pack(table, vocab, depth)
+            if checkpoint_workdir is not None and time.time() - last_checkpoint >= checkpoint_every_sec:
+                _save_checkpoint(checkpoint_workdir, table, vocab, depth)
+                last_checkpoint = time.time()
             try:
                 env.set_state(state)
                 acts = env.valid_actions()
@@ -110,19 +115,32 @@ def build_compact_table(
 
 def _pack(table: Dict[int, Tuple[int, int, int]], vocab: Dict[str, int], depth: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], int]:
     n = len(table)
-    keys = np.fromiter(table.keys(), dtype=np.uint64, count=n)
-    order = np.argsort(keys, kind='stable')
-    keys = keys[order]
-    parents = np.empty(n, dtype=np.uint64)
-    actions = np.empty(n, dtype=np.uint16)
-    depths = np.empty(n, dtype=np.uint16)
-    for i, h in enumerate(keys.tolist()):
-        ph, ai, d = table[h]
-        parents[i] = np.uint64(ph)
-        actions[i] = np.uint16(ai)
-        depths[i] = np.uint16(min(d, 65535))
+    keys_raw = np.empty(n, dtype=np.uint64)
+    parents_raw = np.empty(n, dtype=np.uint64)
+    actions_raw = np.empty(n, dtype=np.uint16)
+    depths_raw = np.empty(n, dtype=np.uint16)
+    items = table.items()
+    for i, (h, v) in enumerate(items):
+        keys_raw[i] = h
+        parents_raw[i] = v[0]
+        actions_raw[i] = v[1]
+        d = v[2]
+        depths_raw[i] = d if d < 65535 else 65535
+    order = np.argsort(keys_raw, kind='stable')
+    keys = keys_raw[order]
+    parents = parents_raw[order]
+    actions = actions_raw[order]
+    depths = depths_raw[order]
     vocab_list = [a for a, _ in sorted(vocab.items(), key=lambda kv: kv[1])]
     return keys, parents, actions, depths, vocab_list, depth
+
+
+def _save_checkpoint(workdir: str, table, vocab, depth) -> None:
+    try:
+        k, p, a, d, voc, _ = _pack(table, vocab, depth)
+        save_compact(workdir, k, p, a, d, voc)
+    except Exception:
+        pass
 
 
 def save_compact(workdir: str, keys: np.ndarray, parents: np.ndarray, actions: np.ndarray, depths: np.ndarray, vocab: List[str]) -> None:

@@ -17,6 +17,7 @@ from bidir_bfs import bidir_bfs
 from heuristics import make_batched_heuristic
 from compact_table import load_compact, forward_to_compact
 from beam import beam_search_to_compact
+from nn_heuristic import load_nn_scorer
 TIME_LIMIT_DEFAULT = 25 * 60
 SAFETY_MARGIN = 30
 PROFILE_PATH = 'profile.json'
@@ -129,7 +130,19 @@ def _run_sequential(instances: List[dict], output_path: str, deadline_abs: float
     solved_k = state_key(env.get_state())
     gf2 = load_gf2()
     compact = load_compact('.')
-    scorer = make_batched_heuristic(env)
+    manhattan = make_batched_heuristic(env)
+    nn_score = load_nn_scorer(env)
+
+    def scorer(states):
+        m = manhattan(states)
+        if nn_score is None:
+            return m
+        try:
+            nn = nn_score(states)
+        except Exception:
+            return m
+        return np.maximum(m, nn)
+
     profile = load_profile()
     beam_w = 256
     if profile is not None:
@@ -143,7 +156,7 @@ def _run_sequential(instances: List[dict], output_path: str, deadline_abs: float
                 beam_w = 256
         except Exception:
             beam_w = 256
-    print(f'sequential: gf2={gf2 is not None} compact={compact is not None}({len(compact[0]) if compact else 0}) beam_w={beam_w}')
+    print(f'sequential: gf2={gf2 is not None} compact={compact is not None}({len(compact[0]) if compact else 0}) nn={nn_score is not None} beam_w={beam_w}')
     n = len(instances)
     n_solved = 0
     t_start = time.time()

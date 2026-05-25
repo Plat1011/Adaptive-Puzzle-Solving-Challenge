@@ -9,12 +9,15 @@ import gym
 from detect import probe, is_toggle_only
 from gf2_solver import build_action_matrix
 from compact_table import build_compact_table, save_compact
+from nn_heuristic import train_nn
 TIME_LIMIT_DEFAULT = 50 * 60
-SAFETY_MARGIN = 20
+SAFETY_MARGIN = 90
 PROFILE_PATH = 'profile.json'
 GF2_PATH = 'gf2.npz'
-GOAL_TABLE_MAX_STATES = 15_000_000
-GOAL_TABLE_MAX_RSS_MB = 18000.0
+GOAL_TABLE_MAX_STATES = 8_000_000
+GOAL_TABLE_MAX_RSS_MB = 14000.0
+CHECKPOINT_EVERY_SEC = 240.0
+NN_BUDGET_FRACTION = 0.4
 
 
 def main() -> None:
@@ -48,18 +51,28 @@ def main() -> None:
             print(f'  saved {GF2_PATH}: A={A.shape}, actions={len(actions)}')
         except Exception as e:
             print(f'GF(2) build failed: {repr(e)}')
-    else:
-        print('building compact goal-distance table...')
-        t0 = time.time()
+        return
+    bfs_deadline = deadline
+    print(f'building compact goal-distance table (until t+{bfs_deadline - start:.0f}s)...')
+    t0 = time.time()
+    try:
+        keys, parents, actions, depths, vocab, max_depth = build_compact_table(
+            env, deadline=bfs_deadline, max_states=GOAL_TABLE_MAX_STATES, max_rss_mb=GOAL_TABLE_MAX_RSS_MB,
+            checkpoint_workdir='.', checkpoint_every_sec=CHECKPOINT_EVERY_SEC,
+        )
+        print(f'  table: {len(keys)} states, depth {max_depth}, vocab {len(vocab)}, built in {time.time() - t0:.1f}s')
+        save_compact('.', keys, parents, actions, depths, vocab)
+        print(f'  saved compact arrays')
+    except Exception as e:
+        print(f'BFS table build failed: {repr(e)}')
+    nn_deadline = deadline
+    if time.time() + 10 < nn_deadline:
+        print(f'training NN heuristic until t+{nn_deadline - start:.0f}s...')
         try:
-            keys, parents, actions, depths, vocab, max_depth = build_compact_table(
-                env, deadline=deadline, max_states=GOAL_TABLE_MAX_STATES, max_rss_mb=GOAL_TABLE_MAX_RSS_MB,
-            )
-            print(f'  table: {len(keys)} states, depth {max_depth}, vocab {len(vocab)}, built in {time.time() - t0:.1f}s')
-            save_compact('.', keys, parents, actions, depths, vocab)
-            print(f'  saved compact arrays')
+            ok = train_nn(env, deadline=nn_deadline, total_samples=300_000, max_walk=120, batch_size=1024, lr=1e-3, emb_dim=16, hidden=256, seed=args.seed)
+            print(f'  nn training {"ok" if ok else "skipped"}')
         except Exception as e:
-            print(f'BFS table build failed: {repr(e)}')
+            print(f'NN training failed: {repr(e)}')
     print(f'train.py done in {time.time() - start:.1f}s')
 
 

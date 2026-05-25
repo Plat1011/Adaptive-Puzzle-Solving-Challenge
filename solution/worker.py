@@ -9,6 +9,7 @@ import gym
 from common import state_key, to_jsonable
 from heuristics import make_batched_heuristic
 from compact_table import load_compact
+from nn_heuristic import load_nn_scorer
 from solve import solve_one, load_gf2, load_profile
 
 
@@ -24,7 +25,19 @@ def main() -> None:
     solved_k = state_key(env.get_state())
     gf2 = load_gf2()
     compact = load_compact('.')
-    scorer = make_batched_heuristic(env)
+    manhattan = make_batched_heuristic(env)
+    nn_score = load_nn_scorer(env)
+
+    def scorer(states):
+        m = manhattan(states)
+        if nn_score is None:
+            return m
+        try:
+            nn = nn_score(states)
+        except Exception:
+            return m
+        return np.maximum(m, nn)
+
     profile = load_profile()
     beam_w = 256
     if profile is not None:
