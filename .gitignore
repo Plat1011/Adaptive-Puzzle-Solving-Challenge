@@ -1,5 +1,4 @@
 # Data and artifacts
-*.csv
 *.jsonl
 *.pt
 *.pth
@@ -9,15 +8,28 @@
 *.tar
 *.tar.gz
 
+# Generated CSVs from runs (keep docs/methods.csv tracked)
+output_actions.csv
+details.jsonl
+score.json
+verdict.txt
+
 # Run outputs
 outputs/
 runs/
 logs/
 work/
-verdict.txt
-score.json
-output_actions.csv
-input_states.jsonl
+_work/
+baseline/work_test_local/
+submission/
+gt_keys.npy
+gt_parents.npy
+gt_actions.npy
+gt_depths.npy
+gt_vocab.json
+profile.json
+goal_table.pkl
+gf2.npz
 
 # Python
 __pycache__/
