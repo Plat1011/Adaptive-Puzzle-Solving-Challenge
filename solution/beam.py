@@ -6,15 +6,7 @@ from common import state_key, to_jsonable
 from compact_table import hash_key, lookup, reconstruct
 
 
-def beam_search_to_compact(
-    env,
-    initial_state: Any,
-    compact,
-    h_fn_batched: Callable[[List[Any]], np.ndarray],
-    deadline: float,
-    beam_width: int = 256,
-    max_depth: int = 200,
-) -> Optional[List[str]]:
+def beam_search_to_compact(env, initial_state, compact, h_fn_batched, deadline, beam_width=256, max_depth=200):
     if compact is None:
         return None
     keys = compact[0]
@@ -22,13 +14,13 @@ def beam_search_to_compact(
     sh = hash_key(start)
     if lookup(keys, sh) >= 0:
         return reconstruct(compact, sh) or []
-    parents: Dict[int, Tuple[int, Optional[str]]] = {sh: (0, None)}
-    payload: Dict[int, Any] = {sh: start}
-    frontier_keys: List[int] = [sh]
+    parents = {sh: (0, None)}
+    payload = {sh: start}
+    frontier_keys = [sh]
     depth = 0
     while frontier_keys and depth < max_depth and time.time() < deadline:
-        cand_keys: List[int] = []
-        cand_states: List[Any] = []
+        cand_keys = []
+        cand_states = []
         for k in frontier_keys:
             if time.time() >= deadline:
                 break
@@ -54,7 +46,7 @@ def beam_search_to_compact(
                 parents[nh] = (k, a)
                 payload[nh] = ns
                 if lookup(keys, nh) >= 0:
-                    fwd: List[str] = []
+                    fwd = []
                     cur = nh
                     while True:
                         pk, ac = parents[cur]

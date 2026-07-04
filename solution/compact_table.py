@@ -43,33 +43,40 @@ def hash_key(state) -> int:
     return int.from_bytes(hashlib.blake2b(b, digest_size=8).digest(), 'little')
 
 
-def build_compact_table(
-    env,
-    deadline: float,
-    max_states: int = 5_000_000,
-    max_rss_mb: float = 8192.0,
-    checkpoint_workdir: Optional[str] = None,
-    checkpoint_every_sec: float = 300.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], int]:
+def build_compact_table(env, deadline, max_states=5000000, max_rss_mb=8192.0, checkpoint_workdir=None, checkpoint_every_sec=300.0, nn_sample_every=0, nn_sample_cap=300000):
     env.reset()
     goal_state = to_jsonable(env.get_state())
     goal_h = hash_key(goal_state)
-    table: Dict[int, Tuple[int, int, int]] = {goal_h: (int(NO_PARENT), 0, 0)}
-    cur_payload: Dict[int, Any] = {goal_h: goal_state}
-    vocab: Dict[str, int] = {}
+    table = {goal_h: (int(NO_PARENT), 0, 0)}
+    cur_payload = {goal_h: goal_state}
+    vocab = {}
     depth = 0
-    rss_check_every = 50_000
     last_rss_check = 0
     last_checkpoint = time.time()
+    nn_X = []
+    nn_y = []
+    nn_counter = 0
+    nn_n_cells = None
+    if nn_sample_every > 0:
+        try:
+            v0 = np.asarray(env.encode_state(goal_state)['content_values'], dtype=np.int64)
+            nn_X.append(v0)
+            nn_y.append(0)
+            nn_n_cells = v0.shape[0]
+        except Exception:
+            pass
     while cur_payload and time.time() < deadline and len(table) < max_states:
-        next_payload: Dict[int, Any] = {}
+        next_payload = {}
         for h, state in cur_payload.items():
             if time.time() >= deadline or len(table) >= max_states:
                 break
-            if max_rss_mb and len(table) - last_rss_check >= rss_check_every:
+            if max_rss_mb and len(table) - last_rss_check >= 50000:
                 last_rss_check = len(table)
                 if _rss_mb() > max_rss_mb:
-                    return _pack(table, vocab, depth)
+                    packed = _pack(table, vocab, depth)
+                    if nn_X:
+                        return packed + (np.stack(nn_X).astype(np.int64), np.asarray(nn_y, dtype=np.float32))
+                    return packed + (None, None)
             if checkpoint_workdir is not None and time.time() - last_checkpoint >= checkpoint_every_sec:
                 _save_checkpoint(checkpoint_workdir, table, vocab, depth)
                 last_checkpoint = time.time()
@@ -104,38 +111,47 @@ def build_compact_table(
                         vocab[edge] = len(vocab)
                 table[nh] = (h, vocab[edge], depth + 1)
                 next_payload[nh] = ns
+                if nn_sample_every > 0:
+                    nn_counter += 1
+                    if nn_counter % nn_sample_every == 0 and len(nn_X) < nn_sample_cap:
+                        try:
+                            vec = np.asarray(env.encode_state(ns)['content_values'], dtype=np.int64)
+                            if nn_n_cells is None:
+                                nn_n_cells = vec.shape[0]
+                            if vec.shape[0] == nn_n_cells:
+                                nn_X.append(vec)
+                                nn_y.append(depth + 1)
+                        except Exception:
+                            pass
                 if len(table) >= max_states:
                     break
         if not next_payload:
             break
         cur_payload = next_payload
         depth += 1
-    return _pack(table, vocab, depth)
+    packed = _pack(table, vocab, depth)
+    if nn_X:
+        return packed + (np.stack(nn_X).astype(np.int64), np.asarray(nn_y, dtype=np.float32))
+    return packed + (None, None)
 
 
-def _pack(table: Dict[int, Tuple[int, int, int]], vocab: Dict[str, int], depth: int) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], int]:
+def _pack(table, vocab, depth):
     n = len(table)
     keys_raw = np.empty(n, dtype=np.uint64)
     parents_raw = np.empty(n, dtype=np.uint64)
     actions_raw = np.empty(n, dtype=np.uint16)
     depths_raw = np.empty(n, dtype=np.uint16)
-    items = table.items()
-    for i, (h, v) in enumerate(items):
+    for i, (h, v) in enumerate(table.items()):
         keys_raw[i] = h
         parents_raw[i] = v[0]
         actions_raw[i] = v[1]
         d = v[2]
         depths_raw[i] = d if d < 65535 else 65535
     order = np.argsort(keys_raw, kind='stable')
-    keys = keys_raw[order]
-    parents = parents_raw[order]
-    actions = actions_raw[order]
-    depths = depths_raw[order]
-    vocab_list = [a for a, _ in sorted(vocab.items(), key=lambda kv: kv[1])]
-    return keys, parents, actions, depths, vocab_list, depth
+    return keys_raw[order], parents_raw[order], actions_raw[order], depths_raw[order], [a for a, _ in sorted(vocab.items(), key=lambda kv: kv[1])], depth
 
 
-def _save_checkpoint(workdir: str, table, vocab, depth) -> None:
+def _save_checkpoint(workdir, table, vocab, depth):
     try:
         k, p, a, d, voc, _ = _pack(table, vocab, depth)
         save_compact(workdir, k, p, a, d, voc)
@@ -143,7 +159,7 @@ def _save_checkpoint(workdir: str, table, vocab, depth) -> None:
         pass
 
 
-def save_compact(workdir: str, keys: np.ndarray, parents: np.ndarray, actions: np.ndarray, depths: np.ndarray, vocab: List[str]) -> None:
+def save_compact(workdir, keys, parents, actions, depths, vocab):
     np.save(os.path.join(workdir, KEYS_FILE), keys)
     np.save(os.path.join(workdir, PARENTS_FILE), parents)
     np.save(os.path.join(workdir, ACTIONS_FILE), actions)
@@ -152,7 +168,7 @@ def save_compact(workdir: str, keys: np.ndarray, parents: np.ndarray, actions: n
         json.dump(vocab, f, ensure_ascii=False)
 
 
-def load_compact(workdir: str = '.'):
+def load_compact(workdir='.'):
     kpath = os.path.join(workdir, KEYS_FILE)
     if not os.path.exists(kpath):
         return None
@@ -168,19 +184,19 @@ def load_compact(workdir: str = '.'):
     return (keys, parents, actions, depths, vocab)
 
 
-def lookup(keys: np.ndarray, h: int) -> int:
+def lookup(keys, h):
     idx = int(np.searchsorted(keys, np.uint64(h)))
     if idx < len(keys) and int(keys[idx]) == h:
         return idx
     return -1
 
 
-def reconstruct(compact, start_hash: int, max_len: int = 5000) -> Optional[List[str]]:
+def reconstruct(compact, start_hash, max_len=5000):
     keys, parents, actions, depths, vocab = compact
     idx = lookup(keys, start_hash)
     if idx < 0:
         return None
-    out: List[str] = []
+    out = []
     cur = start_hash
     for _ in range(max_len):
         idx = lookup(keys, cur)
@@ -198,17 +214,16 @@ def reconstruct(compact, start_hash: int, max_len: int = 5000) -> Optional[List[
     return out
 
 
-def forward_to_compact(env, initial_state: Any, compact, deadline: float, max_states: int = 80_000) -> Optional[List[str]]:
+def forward_to_compact(env, initial_state, compact, deadline, max_states=80000):
     keys = compact[0]
     start = to_jsonable(initial_state)
     sh = hash_key(start)
     if lookup(keys, sh) >= 0:
         return reconstruct(compact, sh)
-    fwd: Dict[int, Tuple[int, str]] = {sh: (0, '')}
-    cur_payload: Dict[int, Any] = {sh: start}
-    is_root: Dict[int, bool] = {sh: True}
+    fwd = {sh: (0, '')}
+    cur_payload = {sh: start}
     while cur_payload and time.time() < deadline and len(fwd) < max_states:
-        next_payload: Dict[int, Any] = {}
+        next_payload = {}
         for h, state in cur_payload.items():
             if time.time() >= deadline or len(fwd) >= max_states:
                 break
@@ -232,7 +247,7 @@ def forward_to_compact(env, initial_state: Any, compact, deadline: float, max_st
                     continue
                 fwd[nh] = (h, a)
                 if lookup(keys, nh) >= 0:
-                    fwd_actions: List[str] = []
+                    fwd_actions = []
                     cur = nh
                     while True:
                         pk, ac = fwd.get(cur, (0, ''))

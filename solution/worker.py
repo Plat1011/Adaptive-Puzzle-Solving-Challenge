@@ -9,48 +9,29 @@ import gym
 from common import state_key, to_jsonable
 from heuristics import make_batched_heuristic
 from compact_table import load_compact
-from nn_heuristic import load_nn_scorer
-from solve import solve_one, load_gf2, load_profile
+from solve import solve_one, load_gf2, load_profile, _compute_beam_w
 
 
-def main() -> None:
+def main():
     if len(sys.argv) < 4:
-        print('usage: worker.py <chunk.jsonl> <out.csv> <deadline_unix>', file=sys.stderr)
         sys.exit(1)
     chunk_path = sys.argv[1]
     out_path = sys.argv[2]
     deadline_abs = float(sys.argv[3])
     env = gym.make_env()
     env.reset()
-    solved_k = state_key(env.get_state())
+    try:
+        solved_k = state_key(env.get_state())
+    except Exception:
+        solved_k = None
     gf2 = load_gf2()
     compact = load_compact('.')
-    manhattan = make_batched_heuristic(env)
-    nn_score = load_nn_scorer(env)
-
-    def scorer(states):
-        m = manhattan(states)
-        if nn_score is None:
-            return m
-        try:
-            nn = nn_score(states)
-        except Exception:
-            return m
-        return np.maximum(m, nn)
-
+    try:
+        scorer = make_batched_heuristic(env)
+    except Exception:
+        scorer = None
     profile = load_profile()
-    beam_w = 256
-    if profile is not None:
-        try:
-            branching = float(profile.get('branching_mean', 0.0))
-            if branching >= 8:
-                beam_w = 96
-            elif branching >= 5:
-                beam_w = 128
-            else:
-                beam_w = 256
-        except Exception:
-            beam_w = 256
+    beam_w = _compute_beam_w(profile)
     with open(chunk_path, encoding='utf-8') as f:
         instances = [json.loads(l) for l in f if l.strip()]
     n = len(instances)

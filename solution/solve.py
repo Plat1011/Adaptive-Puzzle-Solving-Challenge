@@ -8,16 +8,14 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Callable, List, Optional
+from typing import Any, List, Optional
 import numpy as np
 import gym
-import common
 from common import state_key, to_jsonable
 from bidir_bfs import bidir_bfs
 from heuristics import make_batched_heuristic
 from compact_table import load_compact, forward_to_compact
 from beam import beam_search_to_compact
-from nn_heuristic import load_nn_scorer
 TIME_LIMIT_DEFAULT = 25 * 60
 SAFETY_MARGIN = 30
 PROFILE_PATH = 'profile.json'
@@ -27,12 +25,12 @@ BBFS_MAX_STATES = 60000
 TABLE_FWD_MAX_STATES = 80000
 
 
-def load_jsonl(path: str) -> List[dict]:
+def load_jsonl(path):
     with open(path, encoding='utf-8') as f:
         return [json.loads(l) for l in f if l.strip()]
 
 
-def load_profile() -> Optional[dict]:
+def load_profile():
     if not os.path.exists(PROFILE_PATH):
         return None
     try:
@@ -52,7 +50,7 @@ def load_gf2():
         return None
 
 
-def verify(env, initial_state: Any, actions: List[str]) -> bool:
+def verify(env, initial_state, actions):
     try:
         env.set_state(initial_state)
         for a in actions:
@@ -64,9 +62,12 @@ def verify(env, initial_state: Any, actions: List[str]) -> bool:
         return False
 
 
-def solve_one(env, initial_state: Any, solved_key: str, *, gf2, compact, scorer, beam_w: int, deadline: float) -> List[str]:
-    if state_key(to_jsonable(initial_state)) == solved_key:
-        return []
+def solve_one(env, initial_state, solved_key, *, gf2, compact, scorer, beam_w, deadline):
+    try:
+        if state_key(to_jsonable(initial_state)) == solved_key:
+            return []
+    except Exception:
+        pass
     if gf2 is not None:
         A, actions_list = gf2
         try:
@@ -87,13 +88,12 @@ def solve_one(env, initial_state: Any, solved_key: str, *, gf2, compact, scorer,
             except Exception:
                 pass
     if compact is not None and scorer is not None:
-        widths_to_try = [beam_w]
+        widths = [beam_w]
         if beam_w < 96:
-            widths_to_try.append(beam_w * 2)
-            widths_to_try.append(beam_w * 4)
+            widths += [beam_w * 2, beam_w * 4]
         else:
-            widths_to_try.append(min(beam_w * 2, 512))
-        for w in widths_to_try:
+            widths += [min(beam_w * 2, 512)]
+        for w in widths:
             remaining = deadline - time.time()
             if remaining <= 0.05:
                 break
@@ -124,42 +124,36 @@ def solve_one(env, initial_state: Any, solved_key: str, *, gf2, compact, scorer,
     return []
 
 
-def _run_sequential(instances: List[dict], output_path: str, deadline_abs: float) -> int:
+def _compute_beam_w(profile):
+    if profile is None:
+        return 128
+    try:
+        branching = float(profile.get('branching_mean', 0.0))
+    except Exception:
+        return 128
+    if branching >= 8:
+        return 48
+    if branching >= 5:
+        return 64
+    return 128
+
+
+def _run_sequential(instances, output_path, deadline_abs):
     env = gym.make_env()
     env.reset()
-    solved_k = state_key(env.get_state())
+    try:
+        solved_k = state_key(env.get_state())
+    except Exception:
+        solved_k = None
     gf2 = load_gf2()
     compact = load_compact('.')
-    manhattan = make_batched_heuristic(env)
-    nn_score = load_nn_scorer(env)
-
-    def scorer(states):
-        m = manhattan(states)
-        if nn_score is None:
-            return m
-        try:
-            nn = nn_score(states)
-        except Exception:
-            return m
-        return np.maximum(m, nn)
-
+    try:
+        scorer = make_batched_heuristic(env)
+    except Exception:
+        scorer = None
     profile = load_profile()
-    beam_w = 256
-    if profile is not None:
-        try:
-            branching = float(profile.get('branching_mean', 0.0))
-            if branching >= 8:
-                beam_w = 96
-            elif branching >= 5:
-                beam_w = 128
-            else:
-                beam_w = 256
-        except Exception:
-            beam_w = 256
-    print(f'sequential: gf2={gf2 is not None} compact={compact is not None}({len(compact[0]) if compact else 0}) nn={nn_score is not None} beam_w={beam_w}')
+    beam_w = _compute_beam_w(profile)
     n = len(instances)
-    n_solved = 0
-    t_start = time.time()
     with open(output_path, 'w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=['instance_id', 'actions'])
         writer.writeheader()
@@ -174,22 +168,16 @@ def _run_sequential(instances: List[dict], output_path: str, deadline_abs: float
             inst_deadline = now + per_instance
             try:
                 out = solve_one(env, inst['state'], solved_k, gf2=gf2, compact=compact, scorer=scorer, beam_w=beam_w, deadline=inst_deadline)
-            except Exception as e:
-                print(f'  {iid} solve_one error: {repr(e)}')
+            except Exception:
                 out = []
             writer.writerow({'instance_id': iid, 'actions': ' '.join(out)})
-            if out:
-                n_solved += 1
-            if (i + 1) % 50 == 0 or i + 1 == n:
-                print(f'  {i + 1}/{n} solved={n_solved} elapsed={time.time() - t_start:.0f}s')
-    return n_solved
 
 
-def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, n_workers: int) -> Optional[int]:
+def _run_parallel(instances, output_path, deadline_abs, n_workers):
     tmpdir = tempfile.mkdtemp(prefix='solve_workers_')
     try:
-        chunk_paths: List[str] = []
-        out_paths: List[str] = []
+        chunk_paths = []
+        out_paths = []
         for w in range(n_workers):
             chunk = instances[w::n_workers]
             cpath = os.path.join(tmpdir, f'chunk_{w}.jsonl')
@@ -201,7 +189,6 @@ def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, 
             out_paths.append(opath)
         worker_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'worker.py')
         if not os.path.exists(worker_script):
-            print(f'worker.py not found at {worker_script}; falling back to sequential')
             return None
         env_vars = dict(os.environ)
         env_vars['OMP_NUM_THREADS'] = '1'
@@ -211,13 +198,10 @@ def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, 
         for w in range(n_workers):
             p = subprocess.Popen(
                 [sys.executable, worker_script, chunk_paths[w], out_paths[w], str(deadline_abs)],
-                env=env_vars,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                env=env_vars, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             procs.append(p)
         deadline_with_slack = deadline_abs + 30
-        all_done = True
         for p in procs:
             remaining = max(1.0, deadline_with_slack - time.time())
             try:
@@ -227,8 +211,7 @@ def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, 
                     p.kill()
                 except Exception:
                     pass
-                all_done = False
-        results: dict = {}
+        results = {}
         for opath in out_paths:
             if not os.path.exists(opath):
                 continue
@@ -239,15 +222,13 @@ def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, 
                         results[row['instance_id']] = row.get('actions', '') or ''
             except Exception:
                 continue
-        n_solved = sum(1 for v in results.values() if v)
         with open(output_path, 'w', encoding='utf-8', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=['instance_id', 'actions'])
             writer.writeheader()
             for inst in instances:
                 iid = inst['instance_id']
                 writer.writerow({'instance_id': iid, 'actions': results.get(iid, '')})
-        print(f'parallel: {n_solved}/{len(instances)} solved, all_done={all_done}')
-        return n_solved
+        return 0
     finally:
         try:
             shutil.rmtree(tmpdir)
@@ -255,13 +236,12 @@ def _run_parallel(instances: List[dict], output_path: str, deadline_abs: float, 
             pass
 
 
-def main() -> None:
+def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--input', default='input_states.jsonl')
     ap.add_argument('--output', default='output_actions.csv')
     ap.add_argument('--time_limit', type=int, default=int(os.environ.get('SOLVE_TIME_LIMIT', TIME_LIMIT_DEFAULT)))
     ap.add_argument('--workers', type=int, default=int(os.environ.get('SOLVE_WORKERS', 0)))
-    ap.add_argument('--no-parallel', action='store_true')
     args = ap.parse_args()
     start = time.time()
     deadline = start + args.time_limit - SAFETY_MARGIN
@@ -269,18 +249,16 @@ def main() -> None:
     n = len(instances)
     cpus = os.cpu_count() or 1
     n_workers = args.workers if args.workers > 0 else max(1, min(8, cpus))
-    print(f"env_id={getattr(gym, 'ENV_ID', '?')} loaded {n} instances; cpus={cpus} workers={n_workers}")
-    use_parallel = (not args.no_parallel) and n_workers > 1 and n >= n_workers
-    n_solved_count = None
+    use_parallel = n_workers > 1 and n >= n_workers
+    res = None
     if use_parallel:
         try:
-            n_solved_count = _run_parallel(instances, args.output, deadline, n_workers)
-        except Exception as e:
-            print(f'parallel failed: {repr(e)}; falling back to sequential')
-            n_solved_count = None
-    if n_solved_count is None:
-        n_solved_count = _run_sequential(instances, args.output, deadline)
-    print(f'final: {n_solved_count}/{n} solved, total {time.time() - start:.1f}s')
+            res = _run_parallel(instances, args.output, deadline, n_workers)
+        except Exception:
+            res = None
+    if res is None:
+        _run_sequential(instances, args.output, deadline)
+    print(f'done {time.time() - start:.1f}s')
 
 
 if __name__ == '__main__':

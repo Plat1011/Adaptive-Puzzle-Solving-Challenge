@@ -1,26 +1,30 @@
-дата,метод,что сделал,где код,результат,что дальше
-22.05,бейзлайн от орг,RIFE+DIS+A* с маленькой ValueNet,baseline/,toggle_lights ~0.33 / game_15 ~0.3 / cylinder ~0.3,посмотреть слабые места
-22.05,GF(2) для toggle,определяю TOGGLE-только пазлы и решаю систему уравнений над GF(2) гауссом,solution/gf2_solver.py,toggle_lights 50/50 за <2с / score 1.52,подключить в общий dispatcher
-22.05,bidir BFS,универсальный двунаправленный поиск start->goal,solution/bidir_bfs.py,закрывает короткие scramble,использовать как fallback
-22.05,Manhattan heuristic,считаю L1 по позициям из encode_state с пересчётом масштаба осей,solution/heuristics.py,admissible для SWAP пазлов,использовать в A*
-22.05,A* с эвристикой,weighted A* (w=1.5) с Manhattan,solution/astar.py,работает но медленный для глубоких scramble,заменить NN не помог
-22.05,убрал NN из эвристики,NN обучен на random-walk depth - переоценивает - не admissible,solution/solve.py,game_15 0.30 -> 1.23 на 6с/inst,использовать только Manhattan
-22.05,goal-distance table,BFS от цели в train.py копит таблицу state->parent action на сотни тыс состояний,solution/goal_table.py + train.py,cylinder 0.14 -> 1.18 на 1.5с/inst,подключить в solve как первую попытку
-22.05,fast state_key,numpy.tobytes вместо json.dumps для ключей,solution/common.py,~30% быстрее BFS,следующий этап
-22.05,финал v1,связка GF(2) -> goal-table -> bidir BFS -> A*,solution/,toggle 1.54 / game_15 0.29 / cylinder 1.34 / mean ~1.05,IDA* для глубоких 15-puzzle scramble
-,realistic budget v1,1.5с/инстанс (100 инстансов),,toggle 100/100 solved / game_15 19/100 / cylinder 67/100,
-22.05,beam search + goal table,фиксированный frontier с Manhattan-сортировкой на каждом уровне; при попадании в goal_table моментально решает,solution/beam.py,beam=256 game_15 0.29->1.14 / cylinder 1.34->1.38,подобрать beam_width
-22.05,tune beam_width,прогнал beam=512/256/128/64/32 - оказалось меньший лучше (меньше времени на шаг = больше инстансов успеваем),solution/solve.py,beam=128 game_15 1.57 (100/100); beam=64 cylinder 1.72; beam=32 cylinder 1.78,адаптировать по branching
-22.05,адаптивный beam_w,по branching из profile.json: <5 ходов -> 128 / 5..8 -> 64 / >=8 -> 48,solution/solve.py,toggle 1.54 / game_15 1.57 (100/100) / cylinder 1.76 (88/100) / mean 1.62,
-23.05,бамп goal-table cap до 4M состояний,с 300с train у cylinder таблица доросла до 2.07M (с 1.5M кэпа),solution/train.py,cylinder 1.76 -> 1.82 (88 -> 91); game_15 без изменений (98-100/100 / 1.56),
-23.05,скип BBFS если goal_table загружена,redundant с beam search; экономит ~0.6с на инстанс,solution/solve.py,результаты без изменений,
-23.05,iterative widening beam,пробую beam_width [base / 2x / 4x] последовательно на каждом инстансе пока не найдёт,solution/solve.py,game_15 1.57 -> 1.59 (все 100/100); cylinder без изменений,
-23.05,longer train,10мин train для cylinder (vs 5мин), таблица 2.1M -> 2.3M,,cylinder 1.82 -> 1.84 (91 -> 92),по сути упёрлись в формат таблицы
-,финал v3,1.5с/инстанс / 100 инстансов / train 5-10мин,,toggle 1.54 / game_15 1.59 / cylinder 1.84 / mean ~1.66,
-,первый сабмит на контест,результат публичного LB,,68.5 из 100 / 11 из 13 тестов / ML на 2 тестах,fix OOM + параллелизм
-23.05,memory-aware BFS,sys.resource.getrusage RSS-check + drop payload до текущего+следующего слоя; max_rss=4ГБ, max_states=2M,solution/goal_table.py + train.py,не вылетает по OOM на больших state-spaces,
-23.05,параллелим solve по 8 ядрам,multiprocessing.Pool с fork-инициализатором; goal_table делится через fork copy-on-write на Linux,solution/solve.py,cylinder 1.74 -> 1.92 (87/100 -> 100/100); game_15 без изменений; в 3x быстрее по wall-time,
-23.05,убрал NN тренировку,весь train отдан BFS-таблице,solution/train.py,таблица растёт быстрее под тем же лимитом памяти,
-,v4 (мульти-процесс) сабмит,второй сабмит на контест,,0/13 Crash - multiprocessing.Pool сломался в Docker,откатить
-24.05,откатил multiprocessing,одно-поточный solve; везде try/except; defensive heuristic init,solution/solve.py + train.py + goal_table.py,локально toggle 1.54 / game_15 1.58 / cylinder 1.80 / mean ~1.64; не должен крашить,
-,финал v5,1.5с/инст / single thread / OOM-safe / try-except везде,,ожидаемый LB ~85-90 (68.5 v1 + закрытие ML на 2 тестах),
+дата,версия,метод,что сделал,где код,local mean,LB
+22.05,baseline,orgs,ValueNet + A* с random-walk depth labels,baseline/,0.33,-
+22.05,v1,GF(2) для toggle,детект TOGGLE-only и решение системы через гаусс над GF(2),solution/gf2_solver.py,+0.72 на toggle,-
+22.05,v1,bidir BFS,двунаправленный поиск start-goal фолбэк,solution/bidir_bfs.py,+0.7 short scrambles,-
+22.05,v2,Manhattan heuristic,L1 по позициям из encode_state с масштабом осей,solution/heuristics.py,admissible для SWAP,-
+22.05,v2,goal-distance table,BFS от цели в train.py собирает шар состояний,solution/goal_table.py,cylinder 0.14 -> 1.18 (1.5s/inst),-
+22.05,v2,fast state_key,numpy.tobytes вместо json.dumps,solution/common.py,~30% быстрее BFS,-
+23.05,v3,dict goal_table 4M,первый realistic сабмит,solution/,1.65,68.5
+23.05,v3,-,LB 68.5 с ML на 2 тестах,-,,ML на 2 тестах = dict grew too big
+24.05,v4,multiprocessing.Pool fork,попытка ускорить solve через mp.Pool с fork initializer,solution/solve.py,1.68 local,0
+24.05,v4,-,LB 0 - Crash на всех 13 тестах,-,,fork-related crash в контестном Docker
+24.05,v5,rollback + defensive,убрал mp.Pool оставил safety try/except,solution/,1.65,-
+24.05,v6,subprocess parallel,мигрировал на subprocess.Popen через worker.py,solution/solve.py+worker.py,1.66,77.6
+24.05,v7,beam_w=256 везде,бамп beam_w без адаптации по ветвлению,solution/solve.py,1.66,74.9
+24.05,v7,-,LB регресс 2.7 - широкий beam хуже на скрытых high-branching задачах,-,,
+25.05,v8,compact mmap 15M,переход с dict pickle на 4 numpy arrays с blake2b hashing,solution/compact_table.py,1.69,63.2
+25.05,v8,-,LB 63.2 TL на 2 тестах - train не успел упаковать 15M dict,-,,15M dict -> _pack 60s + save 30s > SAFETY_MARGIN 20s
+25.05,v10,NN на random walks + max(M NN),simple MLP обучен на random walks с depth labels max blend с Manhattan,solution/nn_heuristic.py,1.65,74.7
+25.05,v11,CayleyPy clean,NN тренируется на (state exact_depth) парах из BFS beam использует только NN scoring,solution/,1.66,не сабмитили
+25.05,v11 crash,-,попытка сабмита свежих файлов - опять crash,-,,вероятно был неправильный zip уплоаднут
+25.05,v12,compact + checkpoint,убрал NN оставил compact mmap 8M + periodic checkpoint каждые 240с,solution/train.py,1.65,78.0
+25.05,v12,-,LB 78.0 - первое превышение v6 (77.6),-,,checkpoint защищает от TL
+26.05,v12_plus,cap 8M -> 12M RSS 14G -> 18G checkpoint 180s,бамп безопасного cap,solution/train.py,1.66,78.9
+26.05,v12_plus,-,LB 78.9 - текущий максимум,-,,
+,ключевые выводы,-,-,-,,
+,-,GF(2) для toggle-only даёт максимум сразу,-,-,,
+,-,compact mmap + subprocess = стабильная база 78+,-,-,,
+,-,checkpoint критичен - без него большие таблицы = TL,-,-,,
+,-,NN нужно тщательно тестить локально на variety hidden-like envs,-,-,,
+,-,локальный mean плохо предсказывает LB - скрытые задачи другие,-,-,,
